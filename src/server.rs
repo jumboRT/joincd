@@ -1,9 +1,12 @@
 use crate::client::{Client, ClientState};
 use crate::DynResult;
-use std::net::{TcpListener, ToSocketAddrs};
+use std::net::{TcpListener, ToSocketAddrs, Shutdown};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
-use std::thread;
+use std::time::{Instant, Duration};
+use std::thread::{self, JoinHandle};
+use std::io;
+use std::panic;
 
 #[derive(Copy, Clone)]
 pub struct Work {
@@ -47,6 +50,27 @@ impl Server {
     }
 
     pub fn run(self: Arc<Self>) -> DynResult<()> {
+        let server = self.clone();
+
+        let watcher: JoinHandle<Result<(), io::Error>> = thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::new(1, 0));
+
+                let now = Instant::now();
+                let clients = server.clients.read().unwrap();
+
+                for client in clients.iter() {
+                    let unfinished_business = client.unfinished_business.read().unwrap();
+                    let last_update = client.last_update.read().unwrap();
+
+                    if unfinished_business.len() > 0 && now - *last_update >= Duration::new(5, 0) {
+                        println!("[{}] timed out", client.addr);
+                        client.stream.shutdown(Shutdown::Both)?;
+                    }
+                }
+            }
+        });
+
         for stream in self.listener.incoming() {
             let client = Client::new(Arc::downgrade(&self), stream?)?;
 
@@ -58,7 +82,10 @@ impl Server {
             thread::spawn(move || client.run());
         }
 
-        Ok(())
+        match watcher.join() {
+            Ok(x) => Ok(x?),
+            Err(e) => panic::resume_unwind(e),
+        }
     }
 
     pub fn update_jobs(&self) -> DynResult<()> {

@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::time::Instant;
 
 const VERBOSE: bool = false;
 const PROTOVER: u64 = 1;
@@ -36,6 +37,7 @@ pub struct Client {
     pub job_id: RwLock<Option<u64>>,
     pub work_req: AtomicU64,
     pub unfinished_business: RwLock<Vec<WorkItem>>,
+    pub last_update: RwLock<Instant>,
 }
 
 impl Client {
@@ -52,6 +54,7 @@ impl Client {
             job_id: RwLock::new(None),
             work_req: AtomicU64::new(0),
             unfinished_business: RwLock::new(Vec::new()),
+            last_update: RwLock::new(Instant::now()),
         }))
     }
 
@@ -150,6 +153,11 @@ impl Client {
                 ser::write_u64(&mut packet, work.begin);
                 ser::write_u64(&mut packet, work.end);
                 self.write_packet(4, &packet)?;
+
+                if unfinished_business.len() == 0 {
+                    let mut last_update = self.last_update.write().unwrap();
+                    *last_update = Instant::now();
+                }
 
                 unfinished_business.push(WorkItem {
                     work: *work,
@@ -324,6 +332,9 @@ impl Client {
                     .iter_mut()
                     .find(|wi| wi.work.begin <= begin && end <= wi.work.end)
                     .ok_or("invalid work unit begin and end")?;
+
+                let mut last_update = self.last_update.write().unwrap();
+                *last_update = Instant::now();
 
                 work_item.totally_finished_business += end - begin;
                 work_item.finished_business.push(ResultItem {
