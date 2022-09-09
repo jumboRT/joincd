@@ -27,6 +27,7 @@ pub struct Job {
     pub key: String,
     pub render_mode: u64,
     pub batch_size: u64,
+    pub trace_batch_size: u64,
     pub work: Vec<Work>,
 }
 
