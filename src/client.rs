@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Instant;
 
 const VERBOSE: bool = true;
-const PROTOVER: u64 = 3;
+const PROTOVER: u64 = 2;
 
 pub enum ClientState {
     Unknown,
@@ -343,8 +343,6 @@ impl Client {
 
         {
             let mut server_jobs = server.jobs.write().unwrap();
-            let job_id_opt = self.job_id.read().unwrap();
-            let job_id = job_id_opt.unwrap();
             let job_opt = server_jobs.iter_mut().find(|j| j.id == job_id);
             let mut unfinished_business = self.unfinished_business.write().unwrap();
 
