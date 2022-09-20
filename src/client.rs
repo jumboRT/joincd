@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Instant;
 
 const VERBOSE: bool = true;
-const PROTOVER: u64 = 2;
+const PROTOVER: u64 = 3;
 
 pub enum ClientState {
     Unknown,
