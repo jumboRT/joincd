@@ -1,17 +1,18 @@
 use crate::client::{Client, ClientState};
 use crate::DynResult;
-use std::net::{TcpListener, ToSocketAddrs, Shutdown};
+use std::io;
+use std::net::{Shutdown, TcpListener, ToSocketAddrs};
+use std::panic;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
-use std::time::{Instant, Duration};
 use std::thread::{self, JoinHandle};
-use std::io;
-use std::panic;
+use std::time::{Duration, Instant};
 
 #[derive(Copy, Clone)]
 pub struct Work {
     pub begin: u64,
     pub end: u64,
+    pub workers: u64,
 }
 
 pub struct Job {
@@ -53,21 +54,19 @@ impl Server {
     pub fn run(self: Arc<Self>) -> DynResult<()> {
         let server = self.clone();
 
-        let watcher: JoinHandle<Result<(), io::Error>> = thread::spawn(move || {
-            loop {
-                thread::sleep(Duration::new(1, 0));
+        let watcher: JoinHandle<Result<(), io::Error>> = thread::spawn(move || loop {
+            thread::sleep(Duration::new(1, 0));
 
-                let now = Instant::now();
-                let clients = server.clients.read().unwrap();
+            let now = Instant::now();
+            let clients = server.clients.read().unwrap();
 
-                for client in clients.iter() {
-                    let unfinished_business = client.unfinished_business.read().unwrap();
-                    let last_update = client.last_update.read().unwrap();
+            for client in clients.iter() {
+                let unfinished_business = client.unfinished_business.read().unwrap();
+                let last_update = client.last_update.read().unwrap();
 
-                    if unfinished_business.len() > 0 && now - *last_update >= Duration::new(5, 0) {
-                        println!("[{}] timed out", client.addr);
-                        client.stream.shutdown(Shutdown::Both)?;
-                    }
+                if unfinished_business.len() > 0 && now - *last_update >= Duration::new(300, 0) {
+                    println!("[{}] timed out", client.addr);
+                    client.stream.shutdown(Shutdown::Both)?;
                 }
             }
         });

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Instant;
 
-const VERBOSE: bool = false;
+const VERBOSE: bool = true;
 const PROTOVER: u64 = 2;
 
 pub enum ClientState {
@@ -23,7 +23,8 @@ pub struct ResultItem {
 }
 
 pub struct WorkItem {
-    pub work: Work,
+    pub work_begin: u64,
+    pub work_end: u64,
     pub finished_business: Vec<ResultItem>,
     pub totally_finished_business: u64,
 }
@@ -96,7 +97,11 @@ impl Client {
 
                 if let Some(job) = job {
                     for wi in unfinished_business.iter() {
-                        job.work.insert(0, wi.work);
+                        for w in job.work.iter_mut() {
+                            if wi.work_begin == w.begin {
+                                w.workers -= 1;
+                            }
+                        }
                     }
                 }
 
@@ -138,36 +143,41 @@ impl Client {
         let mut unfinished_business = self.unfinished_business.write().unwrap();
 
         if *job_id_opt == Some(job.id) {
-            let n = self.work_req.load(Ordering::SeqCst) as usize - unfinished_business.len();
-            let n = n.min(job.work.len());
+            while unfinished_business.len() < self.work_req.load(Ordering::SeqCst) as usize {
+                if let Some(work) = job
+                    .work
+                    .iter_mut()
+                    .filter(|w| {
+                        unfinished_business
+                            .iter()
+                            .find(|wi| wi.work_begin == w.begin)
+                            .is_none()
+                    })
+                    .min_by_key(|w| w.workers)
+                {
+                    let mut packet = Vec::new();
 
-            for work in job.work[0..n].iter() {
-                if VERBOSE {
-                    println!(
-                        "[{}] send work begin={} end={}",
-                        self.addr, work.begin, work.end
-                    );
+                    ser::write_u64(&mut packet, work.begin);
+                    ser::write_u64(&mut packet, work.end);
+                    self.write_packet(4, &packet)?;
+
+                    if unfinished_business.len() == 0 {
+                        let mut last_update = self.last_update.write().unwrap();
+                        *last_update = Instant::now();
+                    }
+
+                    unfinished_business.push(WorkItem {
+                        work_begin: work.begin,
+                        work_end: work.end,
+                        finished_business: Vec::new(),
+                        totally_finished_business: 0,
+                    });
+
+                    work.workers += 1;
+                } else {
+                    break;
                 }
-
-                let mut packet = Vec::new();
-
-                ser::write_u64(&mut packet, work.begin);
-                ser::write_u64(&mut packet, work.end);
-                self.write_packet(4, &packet)?;
-
-                if unfinished_business.len() == 0 {
-                    let mut last_update = self.last_update.write().unwrap();
-                    *last_update = Instant::now();
-                }
-
-                unfinished_business.push(WorkItem {
-                    work: *work,
-                    finished_business: Vec::new(),
-                    totally_finished_business: 0,
-                });
             }
-
-            job.work.drain(0..n);
         }
 
         Ok(())
@@ -305,7 +315,11 @@ impl Client {
             let job = server_jobs.iter_mut().find(|j| j.id == job_id);
 
             if let Some(job) = job {
-                job.work.push(Work { begin, end });
+                job.work.push(Work {
+                    begin,
+                    end,
+                    workers: 0,
+                });
             }
         }
 
@@ -328,58 +342,64 @@ impl Client {
         }
 
         {
+            let mut server_jobs = server.jobs.write().unwrap();
+            let job_id_opt = self.job_id.read().unwrap();
+            let job_id = job_id_opt.unwrap();
+            let job_opt = server_jobs.iter_mut().find(|j| j.id == job_id);
             let mut unfinished_business = self.unfinished_business.write().unwrap();
 
-            if let Some(begin) = {
-                let work_item = unfinished_business
-                    .iter_mut()
-                    .find(|wi| wi.work.begin <= begin && end <= wi.work.end)
-                    .ok_or("invalid work unit begin and end")?;
+            let work_item = unfinished_business
+                .iter_mut()
+                .find(|wi| wi.work_begin <= begin && end <= wi.work_end)
+                .ok_or("invalid work unit begin and end")?;
 
-                let mut last_update = self.last_update.write().unwrap();
-                *last_update = Instant::now();
+            let mut last_update = self.last_update.write().unwrap();
+            *last_update = Instant::now();
 
-                work_item.totally_finished_business += end - begin;
-                work_item.finished_business.push(ResultItem {
-                    begin,
-                    end,
-                    data: results.to_vec(),
+            work_item.totally_finished_business += end - begin;
+            work_item.finished_business.push(ResultItem {
+                begin,
+                end,
+                data: results.to_vec(),
+            });
+            
+            let work_begin = work_item.work_begin;
+
+            if work_item.totally_finished_business >= work_item.work_end - work_item.work_begin
+            {
+                let clients = server.clients.read().unwrap();
+
+                let client = clients.iter().find(|c| {
+                    let client_job_id_opt = c.job_id.read().unwrap();
+                    let client_state = c.state.read().unwrap();
+
+                    match *client_state {
+                        ClientState::Viewer => *client_job_id_opt == Some(job_id),
+                        _ => false,
+                    }
                 });
+                
+                if let Some(job) = job_opt {
+                    if job.work.iter_mut().find(|w| w.begin == work_item.work_begin).is_some() {
+                        if let Some(client) = client {
+                            for ri in &work_item.finished_business {
+                                let mut packet = Vec::new();
 
-                if work_item.totally_finished_business >= work_item.work.end - work_item.work.begin
-                {
-                    let clients = server.clients.read().unwrap();
+                                ser::write_u64(&mut packet, job_id);
+                                ser::write_u64(&mut packet, ri.data.len() as u64);
+                                ser::write_u64(&mut packet, ri.begin);
+                                ser::write_u64(&mut packet, ri.end);
+                                ser::write_buf(&mut packet, &ri.data);
 
-                    let client = clients.iter().find(|c| {
-                        let client_job_id_opt = c.job_id.read().unwrap();
-                        let client_state = c.state.read().unwrap();
-
-                        match *client_state {
-                            ClientState::Viewer => *client_job_id_opt == Some(job_id),
-                            _ => false,
-                        }
-                    });
-
-                    if let Some(client) = client {
-                        for ri in &work_item.finished_business {
-                            let mut packet = Vec::new();
-
-                            ser::write_u64(&mut packet, job_id);
-                            ser::write_u64(&mut packet, ri.data.len() as u64);
-                            ser::write_u64(&mut packet, ri.begin);
-                            ser::write_u64(&mut packet, ri.end);
-                            ser::write_buf(&mut packet, &ri.data);
-
-                            client.write_packet(5, &packet)?;
+                                client.write_packet(5, &packet)?;
+                            }
                         }
                     }
-
-                    Some(work_item.work.begin)
-                } else {
-                    None
+                    
+                    job.work.retain(|w| w.begin != work_begin);
                 }
-            } {
-                unfinished_business.retain(|wi| wi.work.begin != begin);
+
+                unfinished_business.retain(|wi| wi.work_begin != work_begin);
             }
         }
 
